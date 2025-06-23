@@ -10,9 +10,52 @@ from VehicleDetectionTracker.color_classifier.classifier import Classifier as Co
 from VehicleDetectionTracker.model_classifier.classifier import Classifier as ModelClassifier
 from datetime import datetime
 
+
+
+
+
+
+def encode_image_base64( image):
+    """
+    Encode an image as base64.
+
+    Args:
+        image (numpy.ndarray): The image to be encoded.
+
+    Returns:
+        str: Base64-encoded image.
+    """
+    _, buffer = cv2.imencode('.jpg', image)
+    image_base64 = base64.b64encode(buffer).decode()
+    return image_base64
+
+
+def decode_image_base64(image_base64):
+    """
+    Decode a base64-encoded image.
+
+    Args:
+        image_base64 (str): Base64-encoded image data.
+
+    Returns:
+        numpy.ndarray or None: Decoded image as a numpy array or None if decoding fails.
+    """
+    try:
+        image_data = base64.b64decode(image_base64)
+        image_np = np.frombuffer(image_data, dtype=np.uint8)
+        image = cv2.imdecode(image_np, flags=cv2.IMREAD_COLOR)
+        return image
+    except Exception as e:
+        return None
+    
+    
+    
 class VehicleDetectionTracker:
 
-    def __init__(self, model_path="yolov8n.pt"):
+    def __init__(self, model_path="yolov8n.pt",
+                 callback_classifier = None, 
+                 output_options = 0 # if not none or 0, bit maks for showing 1 or storing 2
+                 ):
         """
         Initialize the VehicleDetection class.
 
@@ -26,7 +69,8 @@ class VehicleDetectionTracker:
         self.color_classifier = None
         self.model_classifier = None
         self.vehicle_timestamps = defaultdict(list)  # Keep track of timestamps for each tracked vehicle
-
+        self._callback_classifier = callback_classifier
+        self._output_options = output_options or 0
 
     def _initialize_classifiers(self):
         if self.color_classifier is None:
@@ -51,7 +95,7 @@ class VehicleDetectionTracker:
                 return label
         return "Unknown"  # Return "Unknown" if the direction doesn't match any defined range
 
-
+    '''
     def _encode_image_base64(self, image):
         """
         Encode an image as base64.
@@ -84,6 +128,10 @@ class VehicleDetectionTracker:
         except Exception as e:
             return None
         
+    '''
+    
+    
+    
     def _increase_brightness(self, image, factor=1.5):
         """
         Increases the brightness of an image by multiplying its pixels by a factor.
@@ -111,7 +159,8 @@ class VehicleDetectionTracker:
             dict or None: Processed information including tracked vehicles' details and the annotated frame in base64,
             or an error message if decoding fails.
         """
-        frame = self._decode_image_base64(frame_base64)
+        #frame = self._decode_image_base64(frame_base64)
+        frame = decode_image_base64(frame_base64)
         if frame is not None:
             return self.process_frame(frame, frame_timestamp)
         else:
@@ -119,7 +168,7 @@ class VehicleDetectionTracker:
                 "error": "Failed to decode the base64 image"
             }
 
-    def process_frame(self, frame, frame_timestamp):
+    def process_frame(self, frame, frame_timestamp, min_probaility = 0.6, callback_classifier = None):
         """
         Process a single video frame to detect and track vehicles.
 
@@ -153,6 +202,9 @@ class VehicleDetectionTracker:
             annotated_frame = results[0].plot()
 
             for box, track_id, cls, conf in zip(boxes, track_ids, clss, conf_list):
+                probability = conf.item()
+                if min_probaility > probability:
+                    continue
                 x, y, w, h = box
                 label = str(names[cls])
                 # Bounding box plot
@@ -234,17 +286,18 @@ class VehicleDetectionTracker:
 
                 # Extract the frame of the detected vehicle
                 vehicle_frame = frame[int(y - h / 2):int(y + h / 2), int(x - w / 2):int(x + w / 2)]
-                vehicle_frame_base64 = self._encode_image_base64(vehicle_frame)
+                #vehicle_frame_base64 = self._encode_image_base64(vehicle_frame)
+                vehicle_frame_base64 = encode_image_base64(vehicle_frame)
                 color_info = self.color_classifier.predict(vehicle_frame)
                 color_info_json = json.dumps(color_info)
                 model_info = self.model_classifier.predict(vehicle_frame)
                 model_info_json = json.dumps(model_info)
-    
+                    
                  # Add vehicle information to the response
-                response["detected_vehicles"].append({
+                res = {
                     "vehicle_id": track_id,
                     "vehicle_type": label,
-                    "detection_confidence": conf.item(),
+                    "detection_confidence": probability,
                     "vehicle_coordinates": {
                         "x": x.item(),
                         "y": y.item(), 
@@ -253,21 +306,35 @@ class VehicleDetectionTracker:
                     },
                     "vehicle_frame_base64": vehicle_frame_base64,
                     "vehicle_frame_timestamp": frame_timestamp, 
-                    "color_info": color_info_json,
-                    "model_info": model_info_json,
+                    #"color_info": color_info_json,
+                    #"model_info": model_info_json,
+                    "color_info": color_info, # we don't a string here
+                    "model_info": model_info,
                     "speed_info": {
                         "kph": speed_kph, 
                         "reliability": reliability,
                         "direction_label": direction_label,
                         "direction": direction
                     }
-                })
+                }
+                
+                if callback_classifier:
+                    others =  callback_classifier(vehicle_frame)
+                    for label,ores in  others:
+                        if label:
+                            res[label] = ores
+                        
+                        
                     
-            annotated_frame_base64 = self._encode_image_base64(annotated_frame)
+                response["detected_vehicles"].append(res)
+            
+            #annotated_frame_base64 = self._encode_image_base64(annotated_frame)        
+            annotated_frame_base64 = encode_image_base64(annotated_frame)
             response["annotated_frame_base64"] = annotated_frame_base64
 
         # Encode the original frame as base64
-        original_frame_base64 = self._encode_image_base64(frame)
+        #original_frame_base64 = self._encode_image_base64(frame)
+        original_frame_base64 = encode_image_base64(frame)
         response["original_frame_base64"] = original_frame_base64
 
         return response
@@ -289,10 +356,11 @@ class VehicleDetectionTracker:
                 frame_rate = int(cap.get(cv2.CAP_PROP_FPS))
                 print(f"Frame rate: {frame_rate} FPS")
                 timestamp = datetime.now()
-                response = self.process_frame(frame, timestamp)
+                response = self.process_frame(frame, timestamp,callback_classifier = self._callback_classifier)
                 if 'annotated_frame_base64' in response:
-                    annotated_frame = self._decode_image_base64(response['annotated_frame_base64'])
-                    if annotated_frame is not None:
+                    #annotated_frame = self._decode_image_base64(response['annotated_frame_base64'])
+                    annotated_frame = decode_image_base64(response['annotated_frame_base64'])
+                    if annotated_frame is not None and (self._output_options & 1 == 1):
                         # Display the annotated frame in a window
                         cv2.imshow("Video Detection Tracker - YOLOv8 + bytetrack", annotated_frame)
                 # Call the callback with the response
